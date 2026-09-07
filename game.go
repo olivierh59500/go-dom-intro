@@ -1,4 +1,5 @@
-package main
+// Package domintro implements the Dom intro remake.
+package domintro
 
 import (
 	"bytes"
@@ -6,6 +7,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	imagedraw "image/draw"
 	_ "image/png"
 	"io"
 	"log"
@@ -34,14 +36,14 @@ const (
 )
 
 type Game struct {
-	starsImage     *ebiten.Image
-	logoImage      *ebiten.Image
-	scrollRast     *ebiten.Image
-	backRast       *ebiten.Image
-	font0          *ebiten.Image
-	font1          *ebiten.Image
-	font2          *ebiten.Image
-	font3          *ebiten.Image
+	starsImage *ebiten.Image
+	logoImage  *ebiten.Image
+	scrollRast *ebiten.Image
+	backRast   *ebiten.Image
+	font0      *ebiten.Image
+	font1      *ebiten.Image
+	font2      *ebiten.Image
+	font3      *ebiten.Image
 
 	scrollCanvas1 *ebiten.Image
 	scrollCanvas2 *ebiten.Image
@@ -55,19 +57,19 @@ type Game struct {
 	scrollText3 *ScrollText
 	scrollText4 *ScrollText
 
-	audioContext     *audio.Context
-	audioPlayer      *audio.Player
-	ymPlayer         *YMPlayer
-	musicStarted     bool
+	audioContext *audio.Context
+	audioPlayer  *audio.Player
+	ymPlayer     *YMPlayer
+	audioReady   bool
+	musicStarted bool
 
-	rng       *rand.Rand
-	stop      int
-	vbl       int
-	posY      float64
-	posY2     float64
-	actSize   int
-	spinc     float64
-	infStars  [8][4]float64
+	rng      *rand.Rand
+	stop     int
+	posY     float64
+	posY2    float64
+	actSize  int
+	spinc    float64
+	infStars [8][4]float64
 
 	// Scroll text state
 	fullText    string
@@ -120,8 +122,6 @@ func (y *YMPlayer) Read(p []byte) (n int, err error) {
 	defer y.mutex.Unlock()
 
 	samplesNeeded := len(p) / 4
-	outBuffer := make([]int16, samplesNeeded*2)
-
 	processed := 0
 	for processed < samplesNeeded {
 		chunkSize := samplesNeeded - processed
@@ -131,9 +131,7 @@ func (y *YMPlayer) Read(p []byte) (n int, err error) {
 
 		if !y.player.Compute(y.buffer[:chunkSize], chunkSize) {
 			if !y.loop {
-				for i := processed * 2; i < len(outBuffer); i++ {
-					outBuffer[i] = 0
-				}
+				clear(p[processed*4 : samplesNeeded*4])
 				err = io.EOF
 				break
 			}
@@ -141,26 +139,18 @@ func (y *YMPlayer) Read(p []byte) (n int, err error) {
 
 		for i := 0; i < chunkSize; i++ {
 			sample := int16(float64(y.buffer[i]) * y.volume)
-			outBuffer[(processed+i)*2] = sample
-			outBuffer[(processed+i)*2+1] = sample
+			offset := (processed + i) * 4
+			p[offset] = byte(sample)
+			p[offset+1] = byte(sample >> 8)
+			p[offset+2] = byte(sample)
+			p[offset+3] = byte(sample >> 8)
 		}
 
 		processed += chunkSize
 		y.position += int64(chunkSize)
 	}
 
-	buf := make([]byte, 0, len(outBuffer)*2)
-	for _, sample := range outBuffer {
-		buf = append(buf, byte(sample), byte(sample>>8))
-	}
-
-	copy(p, buf)
-	n = len(buf)
-	if n > len(p) {
-		n = len(p)
-	}
-
-	return n, err
+	return samplesNeeded * 4, err
 }
 
 func (y *YMPlayer) Close() error {
@@ -175,16 +165,14 @@ func (y *YMPlayer) Close() error {
 }
 
 type ScrollText struct {
-	canvas       *ebiten.Image
-	font         *ebiten.Image
-	text         string
-	speed        float64
-	offset       float64
-	tileW        int
-	tileH        int
-	scaleX       float64
-	scaleY       float64
-	visibleChars int
+	canvas *ebiten.Image
+	glyphs []*ebiten.Image
+	tiles  []int
+	speed  float64
+	offset float64
+	tileW  int
+	scaleX float64
+	scaleY float64
 }
 
 func NewGame() *Game {
@@ -198,11 +186,11 @@ func NewGame() *Game {
 		offScroll:     ebiten.NewImage(640, 400),
 		mergeCanvas:   ebiten.NewImage(640, 400),
 
-		rng:           rng,
-		stop:          1,
-		posY2:         200,
-		actSize:       0,
-		spinc:         1,
+		rng:     rng,
+		stop:    1,
+		posY2:   200,
+		actSize: 0,
+		spinc:   1,
 	}
 
 	g.loadAssets()
@@ -225,14 +213,11 @@ func NewGame() *Game {
 	g.setSpeed()
 
 	for i := 0; i < 8; i++ {
-		g.infStars[i][0] = math.Round(g.rng.Float64() * 9) * 64
+		g.infStars[i][0] = math.Round(g.rng.Float64()*9) * 64
 		g.infStars[i][1] = math.Round(g.rng.Float64() * 354)
 		g.infStars[i][2] = math.Round(g.rng.Float64()*4) + 4
 		g.infStars[i][3] = math.Round(g.rng.Float64() * 10)
 	}
-
-	g.initAudio()
-	g.startMusic()
 
 	return g
 }
@@ -240,9 +225,9 @@ func NewGame() *Game {
 func (g *Game) loadAssets() {
 	g.starsImage = g.loadImage("rep_stars.png")
 	g.logoImage = g.loadImage("rep_ik+_logo.png")
-	g.scrollRast = g.loadImage("rep_ik+_rast1.png")
-	g.backRast = g.loadImage("rep_ik+_rast2.png")
-	
+	g.scrollRast = g.loadRepeatedImage("rep_ik+_rast1.png", 640)
+	g.backRast = g.loadRepeatedImage("rep_ik+_rast2.png", screenWidth)
+
 	// Use only font0 and scale it for other sizes (font3 is non-uniform: 8x width, 12x height).
 	baseFontImage := g.loadImage("rep_ik+_font0.png")
 	g.font0 = baseFontImage // 1x scale
@@ -280,64 +265,74 @@ func (g *Game) startMusic() {
 }
 
 func (g *Game) loadImage(name string) *ebiten.Image {
+	return ebiten.NewImageFromImage(g.loadDecodedImage(name))
+}
+
+func (g *Game) loadRepeatedImage(name string, width int) *ebiten.Image {
+	source := g.loadDecodedImage(name)
+	bounds := source.Bounds()
+	if width <= bounds.Dx() || bounds.Dx() <= 0 {
+		return ebiten.NewImageFromImage(source)
+	}
+
+	repeated := image.NewRGBA(image.Rect(0, 0, width, bounds.Dy()))
+	for x := 0; x < width; x += bounds.Dx() {
+		tileWidth := min(bounds.Dx(), width-x)
+		destination := image.Rect(x, 0, x+tileWidth, bounds.Dy())
+		imagedraw.Draw(repeated, destination, source, bounds.Min, imagedraw.Src)
+	}
+	return ebiten.NewImageFromImage(repeated)
+}
+
+func (g *Game) loadDecodedImage(name string) image.Image {
 	f, err := assets.Open("assets/" + name)
 	if err != nil {
 		log.Printf("Failed to open asset %s: %v", name, err)
-		// Return a blank image as fallback
-		img := ebiten.NewImage(100, 100)
-		img.Fill(colornames.Red)
-		return img
+		return solidImage(100, 100, colornames.Red)
 	}
 	defer f.Close()
 	b, err := io.ReadAll(f)
 	if err != nil {
 		log.Printf("Failed to read asset %s: %v", name, err)
-		img := ebiten.NewImage(100, 100)
-		img.Fill(colornames.Red)
-		return img
+		return solidImage(100, 100, colornames.Red)
 	}
 	img, _, err := image.Decode(bytes.NewReader(b))
 	if err != nil {
 		log.Printf("Failed to decode asset %s: %v", name, err)
-		img := ebiten.NewImage(100, 100)
-		img.Fill(colornames.Red)
-		return img
+		return solidImage(100, 100, colornames.Red)
 	}
-	
+
 	// Log image dimensions
 	bounds := img.Bounds()
-//	log.Printf("Loaded asset %s: %dx%d", name, bounds.Dx(), bounds.Dy())
-	
+	//	log.Printf("Loaded asset %s: %dx%d", name, bounds.Dx(), bounds.Dy())
+
 	// Check if image is too large for atlas (Ebiten limit is around 16384 pixels in any dimension)
 	maxSize := 4096
 	if bounds.Dx() > maxSize || bounds.Dy() > maxSize {
 		log.Printf("WARNING: Image %s is too large (%dx%d), cropping to manageable size", name, bounds.Dx(), bounds.Dy())
-		
+
 		// For font images, crop to a usable portion (top part contains the characters)
 		if strings.Contains(name, "font") {
 			fontWidth := bounds.Dx()
 			fontHeight := min(bounds.Dy(), maxSize) // Take first 4096 pixels of height
-			
-			// Create new image with cropped content
-			croppedImg := ebiten.NewImage(fontWidth, fontHeight)
-			sourceImg := ebiten.NewImageFromImage(img)
-			
-			// Draw the top portion of the original image
-			op := &ebiten.DrawImageOptions{}
-			srcRect := image.Rect(0, 0, fontWidth, fontHeight)
-			croppedImg.DrawImage(sourceImg.SubImage(srcRect).(*ebiten.Image), op)
-			
+
+			croppedImg := image.NewRGBA(image.Rect(0, 0, fontWidth, fontHeight))
+			imagedraw.Draw(croppedImg, croppedImg.Bounds(), img, bounds.Min, imagedraw.Src)
+
 			log.Printf("Cropped font %s to %dx%d", name, fontWidth, fontHeight)
 			return croppedImg
 		}
-		
-		// Create a smaller fallback image for other assets
-		fallbackImg := ebiten.NewImage(min(bounds.Dx(), maxSize), min(bounds.Dy(), maxSize))
-		fallbackImg.Fill(colornames.Gray)
-		return fallbackImg
+
+		return solidImage(min(bounds.Dx(), maxSize), min(bounds.Dy(), maxSize), colornames.Gray)
 	}
-	
-	return ebiten.NewImageFromImage(img)
+
+	return img
+}
+
+func solidImage(width, height int, fill color.Color) image.Image {
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	imagedraw.Draw(img, img.Bounds(), image.NewUniform(fill), image.Point{}, imagedraw.Src)
+	return img
 }
 
 func min(a, b int) int {
@@ -348,18 +343,22 @@ func min(a, b int) int {
 }
 
 func (g *Game) newScrollText(canvas *ebiten.Image, font *ebiten.Image, tileW, tileH int, scaleX, scaleY float64, text string) *ScrollText {
-	st := &ScrollText{
-		canvas:       canvas,
-		font:         font,
-		text:         text,
-		tileW:        tileW,
-		tileH:        tileH,
-		scaleX:       scaleX,
-		scaleY:       scaleY,
-		offset:       float64(canvas.Bounds().Dx()),
-		visibleChars: countVisibleChars(text),
+	glyphCount := font.Bounds().Dy() / tileH
+	glyphs := make([]*ebiten.Image, glyphCount)
+	for tile := range glyphs {
+		rect := image.Rect(0, tile*tileH, tileW, (tile+1)*tileH)
+		glyphs[tile] = font.SubImage(rect).(*ebiten.Image)
 	}
-	return st
+
+	return &ScrollText{
+		canvas: canvas,
+		glyphs: glyphs,
+		tiles:  textTiles(text),
+		tileW:  tileW,
+		scaleX: scaleX,
+		scaleY: scaleY,
+		offset: float64(canvas.Bounds().Dx()),
+	}
 }
 
 func parseControlCode(text string, i int) (int, bool) {
@@ -380,17 +379,21 @@ func parseControlCode(text string, i int) (int, bool) {
 	}
 }
 
-func countVisibleChars(text string) int {
-	count := 0
+func textTiles(text string) []int {
+	tiles := make([]int, 0, len(text))
 	for i := 0; i < len(text); {
 		if _, ok := parseControlCode(text, i); ok {
 			i += 5
 			continue
 		}
-		count++
+		if text[i] == ' ' {
+			tiles = append(tiles, -1)
+		} else {
+			tiles = append(tiles, tileIndex(rune(text[i])))
+		}
 		i++
 	}
-	return count
+	return tiles
 }
 
 func tileIndex(char rune) int {
@@ -468,12 +471,12 @@ func (g *Game) setSpeed() {
 
 func (st *ScrollText) draw() {
 	st.offset -= st.speed
-	if st.visibleChars == 0 {
+	if len(st.tiles) == 0 {
 		return
 	}
 
 	scaledTileW := float64(st.tileW) * st.scaleX
-	totalWidth := float64(st.visibleChars) * scaledTileW
+	totalWidth := float64(len(st.tiles)) * scaledTileW
 	if totalWidth > 0 && st.offset <= -totalWidth {
 		st.offset += totalWidth + float64(st.canvas.Bounds().Dx())
 	}
@@ -483,7 +486,7 @@ func (st *ScrollText) draw() {
 
 func (st *ScrollText) drawAt(offset float64) {
 	st.offset = offset
-	if st.visibleChars == 0 {
+	if len(st.tiles) == 0 {
 		return
 	}
 	st.drawAtOffset(st.offset)
@@ -493,31 +496,25 @@ func (st *ScrollText) drawAtOffset(offset float64) {
 	st.canvas.Clear() // Clear to transparent
 
 	scaledTileW := float64(st.tileW) * st.scaleX
-	x := offset
-	i := 0
-	for x < float64(st.canvas.Bounds().Dx()) {
-		if i >= len(st.text) {
-			break
-		}
-		if _, ok := parseControlCode(st.text, i); ok {
-			i += 5
-			continue
-		}
+	firstTile := 0
+	if offset < 0 {
+		firstTile = int(math.Floor(-offset / scaledTileW))
+	}
+	if firstTile >= len(st.tiles) {
+		return
+	}
 
-		char := rune(st.text[i])
-		tileId := tileIndex(char)
-		subRect := image.Rect(0, tileId*st.tileH, st.tileW, (tileId+1)*st.tileH)
-		if subRect.Max.X <= st.font.Bounds().Dx() && subRect.Max.Y <= st.font.Bounds().Dy() {
-			sub := st.font.SubImage(subRect).(*ebiten.Image)
+	x := offset + float64(firstTile)*scaledTileW
+	for i := firstTile; i < len(st.tiles) && x < float64(st.canvas.Bounds().Dx()); i++ {
+		tileID := st.tiles[i]
+		if tileID >= 0 && tileID < len(st.glyphs) {
 			op := &ebiten.DrawImageOptions{}
-			// Apply scaling
 			op.GeoM.Scale(st.scaleX, st.scaleY)
 			op.GeoM.Translate(x, 0)
 			op.Filter = ebiten.FilterNearest
-			st.canvas.DrawImage(sub, op)
+			st.canvas.DrawImage(st.glyphs[tileID], op)
 		}
 		x += scaledTileW
-		i++
 	}
 }
 
@@ -582,6 +579,15 @@ func (g *Game) updateActSizeFromScroll() {
 }
 
 func (g *Game) Update() error {
+	// On Android, NewGame is called while the native library is loading and
+	// before the Activity has installed Ebitengine's context. Open audio only
+	// once the game loop is running.
+	if !g.audioReady {
+		g.audioReady = true
+		g.initAudio()
+		g.startMusic()
+	}
+
 	if ebiten.IsKeyPressed(ebiten.KeyF1) {
 		if g.spinc < 4 && g.spinc >= 1 {
 			g.spinc++
@@ -603,23 +609,19 @@ func (g *Game) Update() error {
 		g.setSpeed()
 	}
 
-	g.vbl++
-
-	if g.vbl%2 == 0 {
-		g.posY += 4
-		if g.posY >= 654 {
-			g.posY = 0
-		}
-		g.posY2 -= 2
-		if g.posY2 <= 0 {
-			g.posY2 = 200
-		}
+	g.posY += 2
+	if g.posY >= 654 {
+		g.posY = 0
+	}
+	g.posY2--
+	if g.posY2 <= 0 {
+		g.posY2 = 200
 	}
 
 	for i := 0; i < 8; i++ {
 		g.infStars[i][3] += 1 / g.infStars[i][2]
 		if g.infStars[i][3] >= 9 {
-			g.infStars[i][0] = math.Round(g.rng.Float64() * 9) * 64
+			g.infStars[i][0] = math.Round(g.rng.Float64()*9) * 64
 			g.infStars[i][1] = math.Round(g.rng.Float64() * 354)
 			g.infStars[i][2] = math.Round(g.rng.Float64()*4) + 4
 			g.infStars[i][3] = 0
@@ -652,22 +654,22 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		if g.backRast != nil {
 			for j := 0; j < 11; j++ {
 				sy := int(g.posY) + j*4
-				g.drawPart(screen, g.backRast, 0, 60+2+j*36, 0, sy, 1, 36, 1, 0, 768, 1)
+				g.drawPart(screen, g.backRast, 0, 60+2+j*36, 0, sy, screenWidth, 36, 1, 0, 1, 1)
 			}
 		}
 
 		if g.mergeCanvas != nil {
-			g.mergeCanvas.Fill(color.Transparent)
+			g.mergeCanvas.Clear()
 		}
 
 		if g.scrollRast != nil {
-			g.drawPart(g.mergeCanvas, g.scrollRast, 0, int(g.posY2)-200, 0, 0, 2, 200, 1, 0, 320, 1)
-			g.drawPart(g.mergeCanvas, g.scrollRast, 0, int(g.posY2), 0, 0, 2, 200, 1, 0, 320, 1)
-			g.drawPart(g.mergeCanvas, g.scrollRast, 0, int(g.posY2)+200, 0, 0, 2, 200, 1, 0, 320, 1)
+			g.drawPart(g.mergeCanvas, g.scrollRast, 0, int(g.posY2)-200, 0, 0, 640, 200, 1, 0, 1, 1)
+			g.drawPart(g.mergeCanvas, g.scrollRast, 0, int(g.posY2), 0, 0, 640, 200, 1, 0, 1, 1)
+			g.drawPart(g.mergeCanvas, g.scrollRast, 0, int(g.posY2)+200, 0, 0, 640, 200, 1, 0, 1, 1)
 		}
 
 		if g.offScroll != nil {
-			g.offScroll.Fill(color.Transparent)
+			g.offScroll.Clear()
 		}
 
 		switch g.actSize {
@@ -775,12 +777,4 @@ func (g *Game) drawTile(dest *ebiten.Image, src *ebiten.Image, tile int, dx, dy,
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 	return screenWidth, screenHeight
-}
-
-func main() {
-	ebiten.SetWindowSize(screenWidth, screenHeight)
-	ebiten.SetWindowTitle("Remake of the \"Dom intro\" in Golang + Ebiten")
-	if err := ebiten.RunGame(NewGame()); err != nil {
-		log.Fatal(err)
-	}
 }
