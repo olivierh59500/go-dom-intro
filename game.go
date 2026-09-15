@@ -32,7 +32,7 @@ var ymData []byte
 const (
 	screenWidth  = 768
 	screenHeight = 540
-	sampleRate   = 44100
+	sampleRate   = 48000
 )
 
 type Game struct {
@@ -40,6 +40,9 @@ type Game struct {
 	logoImage  *ebiten.Image
 	scrollRast *ebiten.Image
 	backRast   *ebiten.Image
+	starFrames []*ebiten.Image
+	backSlices []*ebiten.Image
+	mergeTop   *ebiten.Image
 	font0      *ebiten.Image
 	font1      *ebiten.Image
 	font2      *ebiten.Image
@@ -84,14 +87,10 @@ type FontChange struct {
 
 // YMPlayer wraps a YM stream for Ebiten audio.
 type YMPlayer struct {
-	player       *stsound.StSound
-	sampleRate   int
-	buffer       []int16
-	mutex        sync.Mutex
-	position     int64
-	totalSamples int64
-	loop         bool
-	volume       float64
+	player *stsound.StSound
+	buffer []int16
+	mutex  sync.Mutex
+	loop   bool
 }
 
 func NewYMPlayer(data []byte, sampleRate int, loop bool) (*YMPlayer, error) {
@@ -104,16 +103,10 @@ func NewYMPlayer(data []byte, sampleRate int, loop bool) (*YMPlayer, error) {
 
 	player.SetLoopMode(loop)
 
-	info := player.GetInfo()
-	totalSamples := int64(info.MusicTimeInMs) * int64(sampleRate) / 1000
-
 	return &YMPlayer{
-		player:       player,
-		sampleRate:   sampleRate,
-		buffer:       make([]int16, 4096),
-		totalSamples: totalSamples,
-		loop:         loop,
-		volume:       0.5,
+		player: player,
+		buffer: make([]int16, 4096),
+		loop:   loop,
 	}, nil
 }
 
@@ -138,7 +131,7 @@ func (y *YMPlayer) Read(p []byte) (n int, err error) {
 		}
 
 		for i := 0; i < chunkSize; i++ {
-			sample := int16(float64(y.buffer[i]) * y.volume)
+			sample := y.buffer[i] / 2
 			offset := (processed + i) * 4
 			p[offset] = byte(sample)
 			p[offset+1] = byte(sample >> 8)
@@ -147,7 +140,6 @@ func (y *YMPlayer) Read(p []byte) (n int, err error) {
 		}
 
 		processed += chunkSize
-		y.position += int64(chunkSize)
 	}
 
 	return samplesNeeded * 4, err
@@ -194,6 +186,7 @@ func NewGame() *Game {
 	}
 
 	g.loadAssets()
+	g.cacheSubImages()
 
 	// Initialize scroll text state
 	g.fullText = g.getFullText()
@@ -236,6 +229,31 @@ func (g *Game) loadAssets() {
 	g.font3 = baseFontImage // Will be scaled 8x/12x during rendering
 }
 
+func (g *Game) cacheSubImages() {
+	const (
+		starWidth       = 64
+		starHeight      = 46
+		backSliceHeight = 36
+	)
+
+	starCount := g.starsImage.Bounds().Dx() / starWidth
+	g.starFrames = make([]*ebiten.Image, starCount)
+	for tile := range g.starFrames {
+		rect := image.Rect(tile*starWidth, 0, (tile+1)*starWidth, starHeight)
+		g.starFrames[tile] = g.starsImage.SubImage(rect).(*ebiten.Image)
+	}
+
+	maxBackSliceY := g.backRast.Bounds().Dy() - backSliceHeight
+	g.backSlices = make([]*ebiten.Image, maxBackSliceY/2+1)
+	for index := range g.backSlices {
+		y := index * 2
+		rect := image.Rect(0, y, screenWidth, y+backSliceHeight)
+		g.backSlices[index] = g.backRast.SubImage(rect).(*ebiten.Image)
+	}
+
+	g.mergeTop = g.mergeCanvas.SubImage(image.Rect(0, 0, g.mergeCanvas.Bounds().Dx(), 2)).(*ebiten.Image)
+}
+
 func (g *Game) initAudio() {
 	g.audioContext = audio.NewContext(sampleRate)
 
@@ -249,7 +267,9 @@ func (g *Game) initAudio() {
 	player, err := g.audioContext.NewPlayer(ym)
 	if err != nil {
 		log.Printf("Failed to create audio player: %v", err)
-		g.ymPlayer.Close()
+		if closeErr := g.ymPlayer.Close(); closeErr != nil {
+			log.Printf("Failed to close YM player: %v", closeErr)
+		}
 		g.ymPlayer = nil
 		return
 	}
@@ -285,13 +305,7 @@ func (g *Game) loadRepeatedImage(name string, width int) *ebiten.Image {
 }
 
 func (g *Game) loadDecodedImage(name string) image.Image {
-	f, err := assets.Open("assets/" + name)
-	if err != nil {
-		log.Printf("Failed to open asset %s: %v", name, err)
-		return solidImage(100, 100, colornames.Red)
-	}
-	defer f.Close()
-	b, err := io.ReadAll(f)
+	b, err := assets.ReadFile("assets/" + name)
 	if err != nil {
 		log.Printf("Failed to read asset %s: %v", name, err)
 		return solidImage(100, 100, colornames.Red)
@@ -425,6 +439,7 @@ func (g *Game) rebuildText(size int, defaultActive bool) string {
 	var sb strings.Builder
 	active := defaultActive
 	text := g.fullText
+	sb.Grow(len(text))
 
 	for i := 0; i < len(text); {
 		if codeSize, ok := parseControlCode(text, i); ok {
@@ -469,7 +484,7 @@ func (g *Game) setSpeed() {
 	}
 }
 
-func (st *ScrollText) draw() {
+func (st *ScrollText) advance() {
 	st.offset -= st.speed
 	if len(st.tiles) == 0 {
 		return
@@ -480,16 +495,19 @@ func (st *ScrollText) draw() {
 	if totalWidth > 0 && st.offset <= -totalWidth {
 		st.offset += totalWidth + float64(st.canvas.Bounds().Dx())
 	}
-
-	st.drawAtOffset(st.offset)
 }
 
-func (st *ScrollText) drawAt(offset float64) {
-	st.offset = offset
-	if len(st.tiles) == 0 {
-		return
+func (g *Game) activeScrollText() *ScrollText {
+	switch g.actSize {
+	case 1:
+		return g.scrollText2
+	case 2:
+		return g.scrollText3
+	case 3:
+		return g.scrollText4
+	default:
+		return g.scrollText1
 	}
-	st.drawAtOffset(st.offset)
 }
 
 func (st *ScrollText) drawAtOffset(offset float64) {
@@ -629,32 +647,48 @@ func (g *Game) Update() error {
 	}
 
 	if g.scrollText1 != nil {
-		g.scrollText1.draw()
+		g.scrollText1.advance()
 		baseOffset := g.scrollText1.offset
 		baseWidth := float64(g.scrollText1.canvas.Bounds().Dx())
 		if g.scrollText2 != nil {
-			g.scrollText2.drawAt(baseOffset*g.scrollText2.scaleX + (1-g.scrollText2.scaleX)*baseWidth)
+			g.scrollText2.offset = baseOffset*g.scrollText2.scaleX + (1-g.scrollText2.scaleX)*baseWidth
 		}
 		if g.scrollText3 != nil {
-			g.scrollText3.drawAt(baseOffset*g.scrollText3.scaleX + (1-g.scrollText3.scaleX)*baseWidth)
+			g.scrollText3.offset = baseOffset*g.scrollText3.scaleX + (1-g.scrollText3.scaleX)*baseWidth
 		}
 		if g.scrollText4 != nil {
-			g.scrollText4.drawAt(baseOffset*g.scrollText4.scaleX + (1-g.scrollText4.scaleX)*baseWidth)
+			g.scrollText4.offset = baseOffset*g.scrollText4.scaleX + (1-g.scrollText4.scaleX)*baseWidth
 		}
 	}
 	g.updateActSizeFromScroll()
+	activeScroll := g.activeScrollText()
+	activeScroll.drawAtOffset(activeScroll.offset)
 
 	return nil
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
 	if g.stop > 0 {
-		screen.Fill(colornames.Black)
+		if g.offScroll != nil {
+			g.offScroll.Clear()
+		}
 
-		if g.backRast != nil {
-			for j := 0; j < 11; j++ {
-				sy := int(g.posY) + j*4
-				g.drawPart(screen, g.backRast, 0, 60+2+j*36, 0, sy, screenWidth, 36, 1, 0, 1, 1)
+		switch g.actSize {
+		case 0:
+			if g.scrollCanvas1 != nil {
+				drawRepeatedVertically(g.offScroll, g.scrollCanvas1, 2, 36, 11)
+			}
+		case 1:
+			if g.scrollCanvas2 != nil {
+				drawRepeatedVertically(g.offScroll, g.scrollCanvas2, 2, 66, 6)
+			}
+		case 2:
+			if g.scrollCanvas3 != nil {
+				drawRepeatedVertically(g.offScroll, g.scrollCanvas3, 0, 134, 3)
+			}
+		case 3:
+			if g.scrollCanvas4 != nil {
+				drawImageAt(g.offScroll, g.scrollCanvas4, 0, 4)
 			}
 		}
 
@@ -663,48 +697,28 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		}
 
 		if g.scrollRast != nil {
-			g.drawPart(g.mergeCanvas, g.scrollRast, 0, int(g.posY2)-200, 0, 0, 640, 200, 1, 0, 1, 1)
-			g.drawPart(g.mergeCanvas, g.scrollRast, 0, int(g.posY2), 0, 0, 640, 200, 1, 0, 1, 1)
-			g.drawPart(g.mergeCanvas, g.scrollRast, 0, int(g.posY2)+200, 0, 0, 640, 200, 1, 0, 1, 1)
-		}
-
-		if g.offScroll != nil {
-			g.offScroll.Clear()
-		}
-
-		switch g.actSize {
-		case 0:
-			if g.scrollCanvas1 != nil {
-				for j := 0; j < 11; j++ {
-					g.drawPart(g.offScroll, g.scrollCanvas1, 0, 2+j*36, 0, 0, 640, 32, 1, 0, 1, 1)
-				}
-			}
-		case 1:
-			if g.scrollCanvas2 != nil {
-				for j := 0; j < 6; j++ {
-					g.drawPart(g.offScroll, g.scrollCanvas2, 0, 2+j*66, 0, 0, 640, 64, 1, 0, 1, 1)
-				}
-			}
-		case 2:
-			if g.scrollCanvas3 != nil {
-				g.drawPart(g.offScroll, g.scrollCanvas3, 0, 0, 0, 0, 640, 128, 1, 0, 1, 1)
-				g.drawPart(g.offScroll, g.scrollCanvas3, 0, 134, 0, 0, 640, 128, 1, 0, 1, 1)
-				g.drawPart(g.offScroll, g.scrollCanvas3, 0, 268, 0, 0, 640, 128, 1, 0, 1, 1)
-			}
-		case 3:
-			if g.scrollCanvas4 != nil {
-				g.drawPart(g.offScroll, g.scrollCanvas4, 0, 4, 0, 0, 640, 384, 1, 0, 1, 1)
-			}
+			drawImageAt(g.mergeCanvas, g.scrollRast, 0, int(g.posY2)-200)
+			drawImageAt(g.mergeCanvas, g.scrollRast, 0, int(g.posY2))
+			drawImageAt(g.mergeCanvas, g.scrollRast, 0, int(g.posY2)+200)
 		}
 
 		if g.mergeCanvas != nil && g.offScroll != nil {
 			op := &ebiten.DrawImageOptions{}
-			op.CompositeMode = ebiten.CompositeModeDestinationIn
+			op.Blend = ebiten.BlendDestinationIn
 			op.GeoM.Translate(0, 2)
 			g.mergeCanvas.DrawImage(g.offScroll, op)
-			if g.mergeCanvas.Bounds().Dy() >= 2 {
-				top := g.mergeCanvas.SubImage(image.Rect(0, 0, g.mergeCanvas.Bounds().Dx(), 2)).(*ebiten.Image)
-				top.Clear()
+			g.mergeTop.Clear()
+		}
+
+		screen.Fill(colornames.Black)
+
+		if g.backRast != nil {
+			for j := 0; j < 11; j++ {
+				sy := int(g.posY) + j*4
+				index := sy / 2
+				if index < len(g.backSlices) {
+					drawImageAt(screen, g.backSlices[index], 0, 60+2+j*36)
+				}
 			}
 		}
 
@@ -723,55 +737,32 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		if g.starsImage != nil {
 			for i := 0; i < 8; i++ {
 				tile := int(math.Round(g.infStars[i][3]))
-				g.drawTile(screen, g.starsImage, tile, 64+int(g.infStars[i][0]), 60+int(g.infStars[i][1]), 64, 46, 1, 0, 1, 1)
+				if tile >= 0 && tile < len(g.starFrames) {
+					drawImageAt(screen, g.starFrames[tile], 64+int(g.infStars[i][0]), 60+int(g.infStars[i][1]))
+				}
 			}
 		}
 	}
 }
 
-func (g *Game) drawPart(dest *ebiten.Image, src *ebiten.Image, dx, dy, sx, sy, sw, sh, param8, param9, tileX, tileY int) {
+func drawImageAt(dest, src *ebiten.Image, x, y int) {
 	if src == nil || dest == nil {
 		return
 	}
-	for jy := 0; jy < tileY; jy++ {
-		for jx := 0; jx < tileX; jx++ {
-			subRect := image.Rect(sx, sy, sx+sw, sy+sh)
-			if subRect.Max.X <= src.Bounds().Dx() && subRect.Max.Y <= src.Bounds().Dy() {
-				sub := src.SubImage(subRect).(*ebiten.Image)
-				op := &ebiten.DrawImageOptions{}
-				op.GeoM.Translate(float64(dx+jx*sw), float64(dy+jy*sh))
-				dest.DrawImage(sub, op)
-			}
-		}
-	}
+	var op ebiten.DrawImageOptions
+	op.GeoM.Translate(float64(x), float64(y))
+	dest.DrawImage(src, &op)
 }
 
-func (g *Game) drawTile(dest *ebiten.Image, src *ebiten.Image, tile int, dx, dy, tileW, tileH int, scale float64, rot float64, flipH, flipV int) {
+func drawRepeatedVertically(dest, src *ebiten.Image, y, step, count int) {
 	if src == nil || dest == nil {
 		return
 	}
-	cols := src.Bounds().Dx() / tileW
-	if cols == 0 {
-		return
-	}
-	row := tile / cols
-	col := tile % cols
-	subRect := image.Rect(col*tileW, row*tileH, (col+1)*tileW, (row+1)*tileH)
-	if subRect.Max.X <= src.Bounds().Dx() && subRect.Max.Y <= src.Bounds().Dy() {
-		sub := src.SubImage(subRect).(*ebiten.Image)
-		op := &ebiten.DrawImageOptions{}
-		if flipH == -1 {
-			op.GeoM.Scale(-1, 1)
-			op.GeoM.Translate(float64(tileW), 0)
-		}
-		if flipV == -1 {
-			op.GeoM.Scale(1, -1)
-			op.GeoM.Translate(0, float64(tileH))
-		}
-		op.GeoM.Scale(scale, scale)
-		op.GeoM.Rotate(rot * math.Pi / 180)
-		op.GeoM.Translate(float64(dx), float64(dy))
-		dest.DrawImage(sub, op)
+	var op ebiten.DrawImageOptions
+	op.GeoM.Translate(0, float64(y))
+	for range count {
+		dest.DrawImage(src, &op)
+		op.GeoM.Translate(0, float64(step))
 	}
 }
 
