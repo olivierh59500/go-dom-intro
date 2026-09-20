@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"embed"
 	"fmt"
+	"github.com/olivierh59500/democonstructionkit/composite"
+	"github.com/olivierh59500/democonstructionkit/scrolling"
 	"image"
 	"image/color"
 	imagedraw "image/draw"
@@ -157,14 +159,15 @@ func (y *YMPlayer) Close() error {
 }
 
 type ScrollText struct {
-	canvas *ebiten.Image
-	glyphs []*ebiten.Image
-	tiles  []int
-	speed  float64
-	offset float64
-	tileW  int
-	scaleX float64
-	scaleY float64
+	renderer *scrolling.Scrolling
+	canvas   *ebiten.Image
+	glyphs   []*ebiten.Image
+	tiles    []int
+	speed    float64
+	offset   float64
+	tileW    int
+	scaleX   float64
+	scaleY   float64
 }
 
 func NewGame() *Game {
@@ -511,29 +514,31 @@ func (g *Game) activeScrollText() *ScrollText {
 }
 
 func (st *ScrollText) drawAtOffset(offset float64) {
-	st.canvas.Clear() // Clear to transparent
-
-	scaledTileW := float64(st.tileW) * st.scaleX
-	firstTile := 0
-	if offset < 0 {
-		firstTile = int(math.Floor(-offset / scaledTileW))
-	}
-	if firstTile >= len(st.tiles) {
-		return
-	}
-
-	x := offset + float64(firstTile)*scaledTileW
-	for i := firstTile; i < len(st.tiles) && x < float64(st.canvas.Bounds().Dx()); i++ {
-		tileID := st.tiles[i]
-		if tileID >= 0 && tileID < len(st.glyphs) {
-			op := &ebiten.DrawImageOptions{}
-			op.GeoM.Scale(st.scaleX, st.scaleY)
-			op.GeoM.Translate(x, 0)
-			op.Filter = ebiten.FilterNearest
-			st.canvas.DrawImage(st.glyphs[tileID], op)
+	st.canvas.Clear()
+	if st.renderer == nil {
+		images := make([]*ebiten.Image, len(st.tiles))
+		for i, tile := range st.tiles {
+			if tile >= 0 && tile < len(st.glyphs) {
+				images[i] = st.glyphs[tile]
+			}
 		}
-		x += scaledTileW
+		var err error
+		st.renderer, err = scrolling.FromImages(images, float64(st.tileW))
+		if err != nil {
+			panic(err)
+		}
 	}
+	state := scrolling.IdentityState()
+	state.X = offset
+	state.ScaleX = st.scaleX
+	state.ScaleY = st.scaleY
+	if offset < 0 {
+		state.First = int(math.Floor(-offset / (float64(st.tileW) * st.scaleX)))
+	}
+	state.Map = func(s scrolling.Sample, op *ebiten.DrawImageOptions) bool {
+		return s.X < float64(st.canvas.Bounds().Dx())
+	}
+	st.renderer.DrawAt(st.canvas, state)
 }
 
 func (g *Game) preAnalyzeFontChanges() {
@@ -746,12 +751,9 @@ func (g *Game) Draw(screen *ebiten.Image) {
 }
 
 func drawImageAt(dest, src *ebiten.Image, x, y int) {
-	if src == nil || dest == nil {
-		return
-	}
-	var op ebiten.DrawImageOptions
+	op := ebiten.DrawImageOptions{}
 	op.GeoM.Translate(float64(x), float64(y))
-	dest.DrawImage(src, &op)
+	composite.Instance{Image: src, Options: op}.Draw(dest)
 }
 
 func drawRepeatedVertically(dest, src *ebiten.Image, y, step, count int) {
