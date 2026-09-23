@@ -1,29 +1,30 @@
 // Package domintro implements the Dom intro remake.
 package domintro
 
-import originalassets "go-dom-intro"
-
 import (
 	"bytes"
-
-	"fmt"
-	"github.com/olivierh59500/democonstructionkit/composite"
-	"github.com/olivierh59500/democonstructionkit/scrolling"
+	originalassets "go-dom-intro"
 	"image"
 	"image/color"
+
+	"github.com/olivierh59500/democonstructionkit/composite"
+	"github.com/olivierh59500/democonstructionkit/scrolling"
+	"github.com/olivierh59500/democonstructionkit/scrolltext"
+	"github.com/olivierh59500/democonstructionkit/sound"
+	"strconv"
+
 	imagedraw "image/draw"
+
 	_ "image/png"
-	"io"
 	"log"
 	"math"
 	"math/rand"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
+
 	audio "github.com/olivierh59500/democonstructionkit/sound/output"
-	"github.com/olivierh59500/ym-player/pkg/stsound"
 	"golang.org/x/image/colornames"
 )
 
@@ -65,7 +66,7 @@ type Game struct {
 
 	audioContext *audio.Context
 	audioPlayer  *audio.Player
-	ymPlayer     *YMPlayer
+	musicStream  *sound.Stream
 	audioReady   bool
 	musicStarted bool
 
@@ -79,84 +80,7 @@ type Game struct {
 
 	// Scroll text state
 	fullText    string
-	fontChanges []FontChange
-	totalGlyphs int
-}
-
-type FontChange struct {
-	position int
-	newSize  int
-}
-
-// YMPlayer wraps a YM stream for Ebiten audio.
-type YMPlayer struct {
-	player *stsound.StSound
-	buffer []int16
-	mutex  sync.Mutex
-	loop   bool
-}
-
-func NewYMPlayer(data []byte, sampleRate int, loop bool) (*YMPlayer, error) {
-	player := stsound.CreateWithRate(sampleRate)
-
-	if err := player.LoadMemory(data); err != nil {
-		player.Destroy()
-		return nil, fmt.Errorf("failed to load YM data: %w", err)
-	}
-
-	player.SetLoopMode(loop)
-
-	return &YMPlayer{
-		player: player,
-		buffer: make([]int16, 4096),
-		loop:   loop,
-	}, nil
-}
-
-func (y *YMPlayer) Read(p []byte) (n int, err error) {
-	y.mutex.Lock()
-	defer y.mutex.Unlock()
-
-	samplesNeeded := len(p) / 4
-	processed := 0
-	for processed < samplesNeeded {
-		chunkSize := samplesNeeded - processed
-		if chunkSize > len(y.buffer) {
-			chunkSize = len(y.buffer)
-		}
-
-		if !y.player.Compute(y.buffer[:chunkSize], chunkSize) {
-			if !y.loop {
-				clear(p[processed*4 : samplesNeeded*4])
-				err = io.EOF
-				break
-			}
-		}
-
-		for i := 0; i < chunkSize; i++ {
-			sample := y.buffer[i] / 2
-			offset := (processed + i) * 4
-			p[offset] = byte(sample)
-			p[offset+1] = byte(sample >> 8)
-			p[offset+2] = byte(sample)
-			p[offset+3] = byte(sample >> 8)
-		}
-
-		processed += chunkSize
-	}
-
-	return samplesNeeded * 4, err
-}
-
-func (y *YMPlayer) Close() error {
-	y.mutex.Lock()
-	defer y.mutex.Unlock()
-
-	if y.player != nil {
-		y.player.Destroy()
-		y.player = nil
-	}
-	return nil
+	fontProgram *scrolltext.FontProgram
 }
 
 type ScrollText struct {
@@ -197,10 +121,10 @@ func NewGame() *Game {
 	g.preAnalyzeFontChanges()
 
 	// Create scroll texts - all use the same source text and base font tiles
-	smallText := g.rebuildText(0, true)
-	normalText := g.rebuildText(1, false)
-	mediumText := g.rebuildText(2, false)
-	bigText := g.rebuildText(3, false)
+	smallText := g.fontProgram.MaskedText("0", ' ')
+	normalText := g.fontProgram.MaskedText("1", ' ')
+	mediumText := g.fontProgram.MaskedText("2", ' ')
+	bigText := g.fontProgram.MaskedText("3", ' ')
 
 	g.scrollText1 = g.newScrollText(g.scrollCanvas1, g.font0, 40, 32, 1.0, 1.0, smallText)
 	g.scrollText2 = g.newScrollText(g.scrollCanvas2, g.font1, 40, 32, 2.0, 2.0, normalText)
@@ -261,20 +185,20 @@ func (g *Game) cacheSubImages() {
 func (g *Game) initAudio() {
 	g.audioContext = audio.NewContext(sampleRate)
 
-	ym, err := NewYMPlayer(ymData, sampleRate, true)
+	music, err := sound.Open("music.ym", ymData, sound.Options{SampleRate: sampleRate, Loop: true, PCMFormat: sound.PCM16, Gain: 0.5})
 	if err != nil {
-		log.Printf("Failed to create YM player: %v", err)
+		log.Printf("Failed to open music: %v", err)
 		return
 	}
-	g.ymPlayer = ym
+	g.musicStream = music
 
-	player, err := g.audioContext.NewPlayer(ym)
+	player, err := g.audioContext.NewPlayer(music)
 	if err != nil {
 		log.Printf("Failed to create audio player: %v", err)
-		if closeErr := g.ymPlayer.Close(); closeErr != nil {
-			log.Printf("Failed to close YM player: %v", closeErr)
+		if closeErr := g.musicStream.Close(); closeErr != nil {
+			log.Printf("Failed to close music stream: %v", closeErr)
 		}
-		g.ymPlayer = nil
+		g.musicStream = nil
 		return
 	}
 	g.audioPlayer = player
@@ -379,37 +303,23 @@ func (g *Game) newScrollText(canvas *ebiten.Image, font *ebiten.Image, tileW, ti
 	}
 }
 
-func parseControlCode(text string, i int) (int, bool) {
-	if i+4 >= len(text) || text[i] != '^' {
-		return 0, false
-	}
-	switch text[i : i+5] {
-	case "^Cs0;":
-		return 0, true
-	case "^Cs1;":
-		return 1, true
-	case "^Cs2;":
-		return 2, true
-	case "^Cs3;":
-		return 3, true
-	default:
-		return 0, false
-	}
-}
-
 func textTiles(text string) []int {
+	tokens, err := scrolltext.Parse(text, scrolltext.DomSizes)
+	if err != nil {
+		panic(err)
+	}
 	tiles := make([]int, 0, len(text))
-	for i := 0; i < len(text); {
-		if _, ok := parseControlCode(text, i); ok {
-			i += 5
+	for _, token := range tokens {
+		if token.Kind != scrolltext.Text {
 			continue
 		}
-		if text[i] == ' ' {
-			tiles = append(tiles, -1)
-		} else {
-			tiles = append(tiles, tileIndex(rune(text[i])))
+		for _, r := range token.Text {
+			if r == ' ' {
+				tiles = append(tiles, -1)
+			} else {
+				tiles = append(tiles, tileIndex(r))
+			}
 		}
-		i++
 	}
 	return tiles
 }
@@ -437,30 +347,6 @@ func (g *Game) getFullText() string {
 	text += "^Cs0;              "
 
 	return text
-}
-
-func (g *Game) rebuildText(size int, defaultActive bool) string {
-	var sb strings.Builder
-	active := defaultActive
-	text := g.fullText
-	sb.Grow(len(text))
-
-	for i := 0; i < len(text); {
-		if codeSize, ok := parseControlCode(text, i); ok {
-			active = codeSize == size
-			sb.WriteString(text[i : i+5])
-			i += 5
-			continue
-		}
-		if active {
-			sb.WriteByte(text[i])
-		} else {
-			sb.WriteByte(' ')
-		}
-		i++
-	}
-
-	return sb.String()
 }
 
 func (g *Game) setSpeed() {
@@ -543,22 +429,15 @@ func (st *ScrollText) drawAtOffset(offset float64) {
 }
 
 func (g *Game) preAnalyzeFontChanges() {
-	g.fontChanges = g.fontChanges[:0]
-	glyphPos := 0
-	for i := 0; i < len(g.fullText); {
-		if size, ok := parseControlCode(g.fullText, i); ok {
-			g.fontChanges = append(g.fontChanges, FontChange{glyphPos, size})
-			i += 5
-			continue
-		}
-		glyphPos++
-		i++
+	var err error
+	g.fontProgram, err = scrolltext.NewFontProgram(g.fullText, scrolltext.DomSizes, "0")
+	if err != nil {
+		panic(err)
 	}
-	g.totalGlyphs = glyphPos
 }
 
 func (g *Game) updateActSizeFromScroll() {
-	if g.totalGlyphs == 0 {
+	if g.fontProgram.Len() == 0 {
 		return
 	}
 
@@ -584,17 +463,13 @@ func (g *Game) updateActSizeFromScroll() {
 	}
 	visibleGlyphs := int(math.Ceil(float64(st.canvas.Bounds().Dx())/tileW)) + 1
 	glyphPos := leftGlyph + visibleGlyphs
-	if glyphPos >= g.totalGlyphs {
-		glyphPos = g.totalGlyphs - 1
+	if glyphPos >= g.fontProgram.Len() {
+		glyphPos = g.fontProgram.Len() - 1
 	}
 
-	size := 0
-	for _, change := range g.fontChanges {
-		if change.position <= glyphPos {
-			size = change.newSize
-		} else {
-			break
-		}
+	size, err := strconv.Atoi(g.fontProgram.FontAt(glyphPos))
+	if err != nil {
+		panic(err)
 	}
 	if size != g.actSize {
 		g.actSize = size
