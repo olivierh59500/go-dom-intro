@@ -3,6 +3,7 @@ package domintro
 
 import (
 	"bytes"
+	"github.com/olivierh59500/democonstructionkit/presets"
 	originalassets "go-dom-intro"
 	"image"
 	"image/color"
@@ -286,10 +287,9 @@ func min(a, b int) int {
 
 func (g *Game) newScrollText(canvas *ebiten.Image, font *ebiten.Image, tileW, tileH int, scaleX, scaleY float64, text string) *ScrollText {
 	glyphCount := font.Bounds().Dy() / tileH
-	glyphs := make([]*ebiten.Image, glyphCount)
-	for tile := range glyphs {
-		rect := image.Rect(0, tile*tileH, tileW, (tile+1)*tileH)
-		glyphs[tile] = font.SubImage(rect).(*ebiten.Image)
+	glyphs, err := scrolling.GridImages(font, image.Pt(tileW, tileH), 1, glyphCount)
+	if err != nil {
+		panic(err)
 	}
 
 	return &ScrollText{
@@ -324,12 +324,13 @@ func textTiles(text string) []int {
 	return tiles
 }
 
-func tileIndex(char rune) int {
-	if char < ' ' || char > 'Z' {
-		return 0
+var tileIndex = func() func(rune) int {
+	lookup, err := presets.TileLookup("go-dom-intro", true)
+	if err != nil {
+		panic(err)
 	}
-	return int(char - ' ')
-}
+	return func(r rune) int { index, _ := lookup(r); return index }
+}()
 
 func (g *Game) getFullText() string {
 	spc0 := "                 "
