@@ -9,6 +9,7 @@ import (
 	"image/color"
 
 	"github.com/olivierh59500/democonstructionkit/composite"
+	"github.com/olivierh59500/democonstructionkit/motion"
 	"github.com/olivierh59500/democonstructionkit/scrolling"
 	"github.com/olivierh59500/democonstructionkit/scrolltext"
 	"github.com/olivierh59500/democonstructionkit/sound"
@@ -71,13 +72,14 @@ type Game struct {
 	audioReady   bool
 	musicStarted bool
 
-	rng      *rand.Rand
-	stop     int
-	posY     float64
-	posY2    float64
-	actSize  int
-	spinc    float64
-	infStars [8][4]float64
+	rng              *rand.Rand
+	stop             int
+	backgroundMotion *motion.WrapBank
+	rasterMotion     *motion.WrapBank
+	motionErr        error
+	actSize          int
+	spinc            float64
+	infStars         [8][4]float64
 
 	// Scroll text state
 	fullText    string
@@ -109,9 +111,22 @@ func NewGame() *Game {
 
 		rng:     rng,
 		stop:    1,
-		posY2:   200,
 		actSize: 0,
 		spinc:   1,
+	}
+	g.backgroundMotion, g.motionErr = motion.NewWrapBank(motion.WrapBankConfig{
+		Start: []float64{0}, Velocity: []float64{2},
+		Upper: &motion.WrapLimit{Boundary: 654, Restart: 0, Inclusive: true},
+	})
+	if g.motionErr != nil {
+		return g
+	}
+	g.rasterMotion, g.motionErr = motion.NewWrapBank(motion.WrapBankConfig{
+		Start: []float64{200}, Velocity: []float64{-1},
+		Lower: &motion.WrapLimit{Boundary: 0, Restart: 200, Inclusive: true},
+	})
+	if g.motionErr != nil {
+		return g
 	}
 
 	g.loadAssets()
@@ -479,6 +494,9 @@ func (g *Game) updateActSizeFromScroll() {
 }
 
 func (g *Game) Update() error {
+	if g.motionErr != nil {
+		return g.motionErr
+	}
 	// On Android, NewGame is called while the native library is loading and
 	// before the Activity has installed Ebitengine's context. Open audio only
 	// once the game loop is running.
@@ -509,14 +527,8 @@ func (g *Game) Update() error {
 		g.setSpeed()
 	}
 
-	g.posY += 2
-	if g.posY >= 654 {
-		g.posY = 0
-	}
-	g.posY2--
-	if g.posY2 <= 0 {
-		g.posY2 = 200
-	}
+	g.backgroundMotion.Step()
+	g.rasterMotion.Step()
 
 	for i := 0; i < 8; i++ {
 		g.infStars[i][3] += 1 / g.infStars[i][2]
@@ -550,6 +562,10 @@ func (g *Game) Update() error {
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
+	if g.motionErr != nil {
+		screen.Fill(colornames.Black)
+		return
+	}
 	if g.stop > 0 {
 		if g.offScroll != nil {
 			g.offScroll.Clear()
@@ -579,9 +595,9 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		}
 
 		if g.scrollRast != nil {
-			drawImageAt(g.mergeCanvas, g.scrollRast, 0, int(g.posY2)-200)
-			drawImageAt(g.mergeCanvas, g.scrollRast, 0, int(g.posY2))
-			drawImageAt(g.mergeCanvas, g.scrollRast, 0, int(g.posY2)+200)
+			drawImageAt(g.mergeCanvas, g.scrollRast, 0, int(g.rasterMotion.At(0))-200)
+			drawImageAt(g.mergeCanvas, g.scrollRast, 0, int(g.rasterMotion.At(0)))
+			drawImageAt(g.mergeCanvas, g.scrollRast, 0, int(g.rasterMotion.At(0))+200)
 		}
 
 		if g.mergeCanvas != nil && g.offScroll != nil {
@@ -596,7 +612,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 
 		if g.backRast != nil {
 			for j := 0; j < 11; j++ {
-				sy := int(g.posY) + j*4
+				sy := int(g.backgroundMotion.At(0)) + j*4
 				index := sy / 2
 				if index < len(g.backSlices) {
 					drawImageAt(screen, g.backSlices[index], 0, 60+2+j*36)
