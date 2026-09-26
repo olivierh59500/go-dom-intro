@@ -3,7 +3,9 @@ package domintro
 
 import (
 	"bytes"
+	kit "github.com/olivierh59500/democonstructionkit"
 	"github.com/olivierh59500/democonstructionkit/presets"
+	"github.com/olivierh59500/democonstructionkit/sprites"
 	originalassets "go-dom-intro"
 	"image"
 	"image/color"
@@ -46,7 +48,8 @@ type Game struct {
 	logoImage  *ebiten.Image
 	scrollRast *ebiten.Image
 	backRast   *ebiten.Image
-	starFrames []*ebiten.Image
+	starAtlas  *sprites.Atlas
+	stars      *sprites.AnimatedField
 	backSlices []*ebiten.Image
 	mergeTop   *ebiten.Image
 	font0      *ebiten.Image
@@ -72,14 +75,12 @@ type Game struct {
 	audioReady   bool
 	musicStarted bool
 
-	rng              *rand.Rand
 	stop             int
 	backgroundMotion *motion.WrapBank
 	rasterMotion     *motion.WrapBank
 	motionErr        error
 	actSize          int
 	spinc            float64
-	infStars         [8][4]float64
 
 	// Scroll text state
 	fullText    string
@@ -109,7 +110,6 @@ func NewGame() *Game {
 		offScroll:     ebiten.NewImage(640, 400),
 		mergeCanvas:   ebiten.NewImage(640, 400),
 
-		rng:     rng,
 		stop:    1,
 		actSize: 0,
 		spinc:   1,
@@ -131,6 +131,9 @@ func NewGame() *Game {
 
 	g.loadAssets()
 	g.cacheSubImages()
+	if g.motionErr != nil {
+		return g
+	}
 
 	// Initialize scroll text state
 	g.fullText = g.getFullText()
@@ -149,11 +152,14 @@ func NewGame() *Game {
 
 	g.setSpeed()
 
-	for i := 0; i < 8; i++ {
-		g.infStars[i][0] = math.Round(g.rng.Float64()*9) * 64
-		g.infStars[i][1] = math.Round(g.rng.Float64() * 354)
-		g.infStars[i][2] = math.Round(g.rng.Float64()*4) + 4
-		g.infStars[i][3] = math.Round(g.rng.Float64() * 10)
+	starConfig, err := presets.DOMAnimatedStars(g.starAtlas.Tiles, presets.DefaultDOMStarOptions(rng.Float64))
+	if err != nil {
+		g.motionErr = err
+		return g
+	}
+	g.stars, g.motionErr = sprites.NewAnimatedField(starConfig)
+	if g.motionErr != nil {
+		return g
 	}
 
 	return g
@@ -180,11 +186,11 @@ func (g *Game) cacheSubImages() {
 		backSliceHeight = 36
 	)
 
-	starCount := g.starsImage.Bounds().Dx() / starWidth
-	g.starFrames = make([]*ebiten.Image, starCount)
-	for tile := range g.starFrames {
-		rect := image.Rect(tile*starWidth, 0, (tile+1)*starWidth, starHeight)
-		g.starFrames[tile] = g.starsImage.SubImage(rect).(*ebiten.Image)
+	g.starAtlas, g.motionErr = sprites.NewAtlas(sprites.AtlasConfig{
+		Image: g.starsImage, TileW: starWidth, TileH: starHeight,
+	})
+	if g.motionErr != nil {
+		return
 	}
 
 	maxBackSliceY := g.backRast.Bounds().Dy() - backSliceHeight
@@ -530,13 +536,9 @@ func (g *Game) Update() error {
 	g.backgroundMotion.Step()
 	g.rasterMotion.Step()
 
-	for i := 0; i < 8; i++ {
-		g.infStars[i][3] += 1 / g.infStars[i][2]
-		if g.infStars[i][3] >= 9 {
-			g.infStars[i][0] = math.Round(g.rng.Float64()*9) * 64
-			g.infStars[i][1] = math.Round(g.rng.Float64() * 354)
-			g.infStars[i][2] = math.Round(g.rng.Float64()*4) + 4
-			g.infStars[i][3] = 0
+	if g.stars != nil {
+		if err := g.stars.Update(kit.Frame{}); err != nil {
+			return err
 		}
 	}
 
@@ -632,13 +634,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			screen.DrawImage(g.logoImage, opLogo)
 		}
 
-		if g.starsImage != nil {
-			for i := 0; i < 8; i++ {
-				tile := int(math.Round(g.infStars[i][3]))
-				if tile >= 0 && tile < len(g.starFrames) {
-					drawImageAt(screen, g.starFrames[tile], 64+int(g.infStars[i][0]), 60+int(g.infStars[i][1]))
-				}
-			}
+		if g.stars != nil {
+			g.stars.Draw(screen)
 		}
 	}
 }

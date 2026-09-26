@@ -8,3 +8,9 @@ The choreography and assets remain in this repository. Reusable rendering and
 effects come from the published `github.com/olivierh59500/democonstructionkit`
 module pinned in `go.mod`. Music is opened with `sound.Open`; DCK selects the decoder from the asset and
 provides the configured stereo PCM format. The demo keeps its playback level and loop settings.
+
+The eight animated stars use `sprites.AnimatedField` with cached atlas frames.
+`presets.DefaultDOMStarOptions` retains their original seeded placement,
+independent fractional frame rates and ordered respawn; count, spacing,
+frame lifetime and drawing offsets are editable. The original Go source and
+assets remain at the repository root.
