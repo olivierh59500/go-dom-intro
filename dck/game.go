@@ -11,6 +11,7 @@ import (
 	"image/color"
 
 	"github.com/olivierh59500/democonstructionkit/composite"
+	"github.com/olivierh59500/democonstructionkit/effects"
 	"github.com/olivierh59500/democonstructionkit/motion"
 	"github.com/olivierh59500/democonstructionkit/scrolling"
 	"github.com/olivierh59500/democonstructionkit/sound"
@@ -49,14 +50,11 @@ type Game struct {
 	starAtlas  *sprites.Atlas
 	stars      *sprites.AnimatedField
 	backSlices []*ebiten.Image
-	mergeTop   *ebiten.Image
 	baseFont   *ebiten.Image
-
-	offScroll   *ebiten.Image
-	mergeCanvas *ebiten.Image
 
 	scroll   *scrolling.Scrolling
 	sizeBank *scrolling.SizeBank
+	textMask *effects.Mask
 
 	audioContext *audio.Context
 	audioPlayer  *audio.Player
@@ -66,7 +64,6 @@ type Game struct {
 
 	stop             int
 	backgroundMotion *motion.WrapBank
-	rasterMotion     *motion.WrapBank
 	motionErr        error
 	spinc            float64
 }
@@ -74,13 +71,7 @@ type Game struct {
 func NewGame() *Game {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
-	g := &Game{
-		offScroll:   ebiten.NewImage(640, 400),
-		mergeCanvas: ebiten.NewImage(640, 400),
-
-		stop:  1,
-		spinc: 1,
-	}
+	g := &Game{stop: 1, spinc: 1}
 	g.backgroundMotion, g.motionErr = motion.NewWrapBank(motion.WrapBankConfig{
 		Start: []float64{0}, Velocity: []float64{2},
 		Upper: &motion.WrapLimit{Boundary: 654, Restart: 0, Inclusive: true},
@@ -88,14 +79,6 @@ func NewGame() *Game {
 	if g.motionErr != nil {
 		return g
 	}
-	g.rasterMotion, g.motionErr = motion.NewWrapBank(motion.WrapBankConfig{
-		Start: []float64{200}, Velocity: []float64{-1},
-		Lower: &motion.WrapLimit{Boundary: 0, Restart: 200, Inclusive: true},
-	})
-	if g.motionErr != nil {
-		return g
-	}
-
 	g.loadAssets()
 	g.cacheSubImages()
 	if g.motionErr != nil {
@@ -112,6 +95,15 @@ func NewGame() *Game {
 		return g
 	}
 	g.sizeBank = g.scroll.SizeBankController()
+	raster, err := composite.NewRasterOverlay(presets.DOMRasterCopies(g.scrollRast))
+	if err != nil {
+		g.motionErr = err
+		return g
+	}
+	g.textMask, g.motionErr = effects.NewMaskWith(presets.DOMScrollMask(raster, g.scroll))
+	if g.motionErr != nil {
+		return g
+	}
 
 	starConfig, err := presets.DOMAnimatedStars(g.starAtlas.Tiles, presets.DefaultDOMStarOptions(rng.Float64))
 	if err != nil {
@@ -157,7 +149,6 @@ func (g *Game) cacheSubImages() {
 		g.backSlices[index] = g.backRast.SubImage(rect).(*ebiten.Image)
 	}
 
-	g.mergeTop = g.mergeCanvas.SubImage(image.Rect(0, 0, g.mergeCanvas.Bounds().Dx(), 2)).(*ebiten.Image)
 }
 
 func (g *Game) initAudio() {
@@ -301,7 +292,6 @@ func (g *Game) Update() error {
 	}
 
 	g.backgroundMotion.Step()
-	g.rasterMotion.Step()
 
 	if g.stars != nil {
 		if err := g.stars.Update(kit.Frame{}); err != nil {
@@ -309,8 +299,8 @@ func (g *Game) Update() error {
 		}
 	}
 
-	if g.scroll != nil {
-		if err := g.scroll.Update(kit.Frame{}); err != nil {
+	if g.textMask != nil {
+		if err := g.textMask.Update(kit.Frame{}); err != nil {
 			return err
 		}
 	}
@@ -324,32 +314,6 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		return
 	}
 	if g.stop > 0 {
-		if g.offScroll != nil {
-			g.offScroll.Clear()
-		}
-
-		if g.scroll != nil {
-			g.scroll.Draw(g.offScroll)
-		}
-
-		if g.mergeCanvas != nil {
-			g.mergeCanvas.Clear()
-		}
-
-		if g.scrollRast != nil {
-			drawImageAt(g.mergeCanvas, g.scrollRast, 0, int(g.rasterMotion.At(0))-200)
-			drawImageAt(g.mergeCanvas, g.scrollRast, 0, int(g.rasterMotion.At(0)))
-			drawImageAt(g.mergeCanvas, g.scrollRast, 0, int(g.rasterMotion.At(0))+200)
-		}
-
-		if g.mergeCanvas != nil && g.offScroll != nil {
-			op := &ebiten.DrawImageOptions{}
-			op.Blend = ebiten.BlendDestinationIn
-			op.GeoM.Translate(0, 2)
-			g.mergeCanvas.DrawImage(g.offScroll, op)
-			g.mergeTop.Clear()
-		}
-
 		screen.Fill(colornames.Black)
 
 		if g.backRast != nil {
@@ -362,10 +326,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			}
 		}
 
-		if g.mergeCanvas != nil {
-			op2 := &ebiten.DrawImageOptions{}
-			op2.GeoM.Translate(64, 60)
-			screen.DrawImage(g.mergeCanvas, op2)
+		if g.textMask != nil {
+			g.textMask.Draw(screen)
 		}
 
 		if g.logoImage != nil {
@@ -392,11 +354,14 @@ func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 
 // Cleanup releases DCK surfaces and audio streams when the screen closes.
 func (g *Game) Cleanup() {
-	if g.scroll != nil {
+	if g.textMask != nil {
+		_ = g.textMask.Close()
+		g.textMask = nil
+	} else if g.scroll != nil {
 		_ = g.scroll.Close()
-		g.scroll = nil
-		g.sizeBank = nil
 	}
+	g.scroll = nil
+	g.sizeBank = nil
 	if g.audioPlayer != nil {
 		_ = g.audioPlayer.Close()
 		g.audioPlayer = nil

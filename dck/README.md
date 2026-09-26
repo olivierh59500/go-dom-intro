@@ -19,5 +19,7 @@ The four font sizes now use `scrolling.Config.SizeBank` and the editable
 `presets.DOMSizeBank` recipe. DCK owns the synchronized offsets, right-edge
 font controls, per-size speed and cached repeated text strips. The authored
 message stays in `dck/internal/textdata`; a pure test compares the controller
-with the previous choreography across 100,000 simulation ticks. The scene
-still chooses its raster mask, background, logo, stars and input controls.
+with the previous choreography across 100,000 simulation ticks. Three
+moving raster copies color the text through `effects.NewMaskWith`, with editable
+phase, blend, viewport and top crop. The scene still chooses its background,
+logo, stars and input controls.
