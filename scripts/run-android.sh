@@ -2,6 +2,19 @@
 set -eu
 
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+# Preserve the original as the default Android build.
+mobile_package=./mobile
+if [ "$#" -gt 1 ]; then
+    echo "Usage: $0 [--dck]" >&2
+    exit 2
+fi
+case "${1:-}" in
+    "") ;;
+    --dck) mobile_package=./dck/mobile ;;
+    *) echo "Usage: $0 [--dck]" >&2; exit 2 ;;
+esac
+
 android_sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
 java_home_path=${JAVA_HOME:-}
 
@@ -43,7 +56,7 @@ go run github.com/hajimehoshi/ebiten/v2/cmd/ebitenmobile@v2.9.11 \
     -androidapi 23 \
     -javapkg com.olivierh.domintro \
     -o android/app/libs/domintro.aar \
-    ./mobile
+    "$mobile_package"
 
 echo "→ Compilation de l’APK de débogage"
 "$project_root/android/gradlew" -p "$project_root/android" --console=plain assembleDebug
