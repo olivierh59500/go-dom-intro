@@ -13,7 +13,9 @@ func main() {
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	ebiten.SetWindowTitle("Remake of the \"Dom intro\" in Golang + Ebiten")
 	ebiten.SetScreenClearedEveryFrame(false)
-	if err := ebiten.RunGame(newDrawOnUpdateGame(domintro.NewGame())); err != nil {
+	game := domintro.NewGame()
+	defer game.Cleanup()
+	if err := ebiten.RunGame(newDrawOnUpdateGame(game)); err != nil {
 		log.Fatal(err)
 	}
 }

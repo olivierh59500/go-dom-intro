@@ -4,18 +4,28 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/olivierh59500/democonstructionkit/presets"
+	"github.com/olivierh59500/democonstructionkit/scrolltext"
+	"go-dom-intro/dck/internal/textdata"
 )
 
 func TestSharedFontProgramPreservesEveryMessageSlot(t *testing.T) {
-	g := &Game{}
-	g.fullText = g.getFullText()
-	g.preAnalyzeFontChanges()
+	text := textdata.Message()
+	config, err := presets.DOMSizeBank(text, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	program, err := scrolltext.NewFontProgram(config.Text, config.Controls, config.InitialFont)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var fonts []int
 	var masks [4]strings.Builder
 	active := 0
-	for i := 0; i < len(g.fullText); {
-		if i+4 < len(g.fullText) && g.fullText[i:i+3] == "^Cs" && g.fullText[i+4] == ';' && g.fullText[i+3] >= '0' && g.fullText[i+3] <= '3' {
-			active = int(g.fullText[i+3] - '0')
+	for i := 0; i < len(text); {
+		if i+4 < len(text) && text[i:i+3] == "^Cs" && text[i+4] == ';' && text[i+3] >= '0' && text[i+3] <= '3' {
+			active = int(text[i+3] - '0')
 			i += 5
 			continue
 		}
@@ -23,22 +33,22 @@ func TestSharedFontProgramPreservesEveryMessageSlot(t *testing.T) {
 		for bank := range masks {
 			b := byte(' ')
 			if bank == active {
-				b = g.fullText[i]
+				b = text[i]
 			}
 			masks[bank].WriteByte(b)
 		}
 		i++
 	}
-	if len(fonts) != g.fontProgram.Len() {
-		t.Fatalf("glyph count %d != %d", g.fontProgram.Len(), len(fonts))
+	if len(fonts) != program.Len() {
+		t.Fatalf("glyph count %d != %d", program.Len(), len(fonts))
 	}
 	for bank := range masks {
-		if got := g.fontProgram.MaskedText(strconv.Itoa(bank), ' '); got != masks[bank].String() {
+		if got := program.MaskedText(strconv.Itoa(bank), ' '); got != masks[bank].String() {
 			t.Fatalf("bank %d changed", bank)
 		}
 	}
 	for i, want := range fonts {
-		if got := g.fontProgram.FontAt(i); got != strconv.Itoa(want) {
+		if got := program.FontAt(i); got != strconv.Itoa(want) {
 			t.Fatalf("font at %d = %s, want %d", i, got, want)
 		}
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/olivierh59500/democonstructionkit/motion"
 	"github.com/olivierh59500/democonstructionkit/presets"
+	"github.com/olivierh59500/democonstructionkit/scrolltext"
 	"github.com/olivierh59500/democonstructionkit/sound"
 )
 
@@ -53,16 +54,22 @@ func TestAnimatedStarsPreserveSeededFrameAndRespawnSequence(t *testing.T) {
 	}
 }
 
-func TestTextTilesStripsControlCodesAndPreservesSpacing(t *testing.T) {
-	got := textTiles(" A^Cs2;B ")
-	want := []int{-1, tileIndex('A'), tileIndex('B'), -1}
-	if len(got) != len(want) {
-		t.Fatalf("tiles length = %d, want %d", len(got), len(want))
+func TestSizeBankPresetKeepsFontControlsAndSpacing(t *testing.T) {
+	config, err := presets.DOMSizeBank(" A^Cs2;B ", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("tiles[%d] = %d, want %d", i, got[i], want[i])
-		}
+	program, err := scrolltext.NewFontProgram(config.Text, config.Controls, config.InitialFont)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if program.Len() != 4 || program.MaskedText("0", ' ') != " A  " ||
+		program.MaskedText("2", ' ') != "  B " || program.FontAt(2) != "2" {
+		t.Fatal("size-bank font controls changed visible character positions")
+	}
+	if len(config.Layers) != 4 || config.Layers[3].ScaleX != 8 || config.Layers[3].ScaleY != 12 ||
+		config.Layers[3].Repeats != 1 || config.Layers[0].Repeats != 11 {
+		t.Fatal("DOM size-bank material differs from the authored four layers")
 	}
 }
 

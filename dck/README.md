@@ -14,3 +14,10 @@ The eight animated stars use `sprites.AnimatedField` with cached atlas frames.
 independent fractional frame rates and ordered respawn; count, spacing,
 frame lifetime and drawing offsets are editable. The original Go source and
 assets remain at the repository root.
+
+The four font sizes now use `scrolling.Config.SizeBank` and the editable
+`presets.DOMSizeBank` recipe. DCK owns the synchronized offsets, right-edge
+font controls, per-size speed and cached repeated text strips. The authored
+message stays in `dck/internal/textdata`; a pure test compares the controller
+with the previous choreography across 100,000 simulation ticks. The scene
+still chooses its raster mask, background, logo, stars and input controls.

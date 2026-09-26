@@ -13,15 +13,13 @@ import (
 	"github.com/olivierh59500/democonstructionkit/composite"
 	"github.com/olivierh59500/democonstructionkit/motion"
 	"github.com/olivierh59500/democonstructionkit/scrolling"
-	"github.com/olivierh59500/democonstructionkit/scrolltext"
 	"github.com/olivierh59500/democonstructionkit/sound"
-	"strconv"
+	"go-dom-intro/dck/internal/textdata"
 
 	imagedraw "image/draw"
 
 	_ "image/png"
 	"log"
-	"math"
 	"math/rand"
 	"strings"
 	"time"
@@ -52,22 +50,13 @@ type Game struct {
 	stars      *sprites.AnimatedField
 	backSlices []*ebiten.Image
 	mergeTop   *ebiten.Image
-	font0      *ebiten.Image
-	font1      *ebiten.Image
-	font2      *ebiten.Image
-	font3      *ebiten.Image
+	baseFont   *ebiten.Image
 
-	scrollCanvas1 *ebiten.Image
-	scrollCanvas2 *ebiten.Image
-	scrollCanvas3 *ebiten.Image
-	scrollCanvas4 *ebiten.Image
-	offScroll     *ebiten.Image
-	mergeCanvas   *ebiten.Image
+	offScroll   *ebiten.Image
+	mergeCanvas *ebiten.Image
 
-	scrollText1 *ScrollText
-	scrollText2 *ScrollText
-	scrollText3 *ScrollText
-	scrollText4 *ScrollText
+	scroll   *scrolling.Scrolling
+	sizeBank *scrolling.SizeBank
 
 	audioContext *audio.Context
 	audioPlayer  *audio.Player
@@ -79,40 +68,18 @@ type Game struct {
 	backgroundMotion *motion.WrapBank
 	rasterMotion     *motion.WrapBank
 	motionErr        error
-	actSize          int
 	spinc            float64
-
-	// Scroll text state
-	fullText    string
-	fontProgram *scrolltext.FontProgram
-}
-
-type ScrollText struct {
-	renderer *scrolling.Scrolling
-	canvas   *ebiten.Image
-	glyphs   []*ebiten.Image
-	tiles    []int
-	speed    float64
-	offset   float64
-	tileW    int
-	scaleX   float64
-	scaleY   float64
 }
 
 func NewGame() *Game {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	g := &Game{
-		scrollCanvas1: ebiten.NewImage(640, 32),
-		scrollCanvas2: ebiten.NewImage(640, 64),
-		scrollCanvas3: ebiten.NewImage(640, 128),
-		scrollCanvas4: ebiten.NewImage(640, 384),
-		offScroll:     ebiten.NewImage(640, 400),
-		mergeCanvas:   ebiten.NewImage(640, 400),
+		offScroll:   ebiten.NewImage(640, 400),
+		mergeCanvas: ebiten.NewImage(640, 400),
 
-		stop:    1,
-		actSize: 0,
-		spinc:   1,
+		stop:  1,
+		spinc: 1,
 	}
 	g.backgroundMotion, g.motionErr = motion.NewWrapBank(motion.WrapBankConfig{
 		Start: []float64{0}, Velocity: []float64{2},
@@ -135,22 +102,16 @@ func NewGame() *Game {
 		return g
 	}
 
-	// Initialize scroll text state
-	g.fullText = g.getFullText()
-	g.preAnalyzeFontChanges()
-
-	// Create scroll texts - all use the same source text and base font tiles
-	smallText := g.fontProgram.MaskedText("0", ' ')
-	normalText := g.fontProgram.MaskedText("1", ' ')
-	mediumText := g.fontProgram.MaskedText("2", ' ')
-	bigText := g.fontProgram.MaskedText("3", ' ')
-
-	g.scrollText1 = g.newScrollText(g.scrollCanvas1, g.font0, 40, 32, 1.0, 1.0, smallText)
-	g.scrollText2 = g.newScrollText(g.scrollCanvas2, g.font1, 40, 32, 2.0, 2.0, normalText)
-	g.scrollText3 = g.newScrollText(g.scrollCanvas3, g.font2, 40, 32, 4.0, 4.0, mediumText)
-	g.scrollText4 = g.newScrollText(g.scrollCanvas4, g.font3, 40, 32, 8.0, 12.0, bigText)
-
-	g.setSpeed()
+	sizeConfig, err := presets.DOMSizeBank(textdata.Message(), g.baseFont)
+	if err != nil {
+		g.motionErr = err
+		return g
+	}
+	g.scroll, g.motionErr = scrolling.New(scrolling.Config{SizeBank: &sizeConfig})
+	if g.motionErr != nil {
+		return g
+	}
+	g.sizeBank = g.scroll.SizeBankController()
 
 	starConfig, err := presets.DOMAnimatedStars(g.starAtlas.Tiles, presets.DefaultDOMStarOptions(rng.Float64))
 	if err != nil {
@@ -171,12 +132,7 @@ func (g *Game) loadAssets() {
 	g.scrollRast = g.loadRepeatedImage("rep_ik+_rast1.png", 640)
 	g.backRast = g.loadRepeatedImage("rep_ik+_rast2.png", screenWidth)
 
-	// Use only font0 and scale it for other sizes (font3 is non-uniform: 8x width, 12x height).
-	baseFontImage := g.loadImage("rep_ik+_font0.png")
-	g.font0 = baseFontImage // 1x scale
-	g.font1 = baseFontImage // Will be scaled 2x during rendering
-	g.font2 = baseFontImage // Will be scaled 4x during rendering
-	g.font3 = baseFontImage // Will be scaled 8x/12x during rendering
+	g.baseFont = g.loadImage("rep_ik+_font0.png")
 }
 
 func (g *Game) cacheSubImages() {
@@ -306,199 +262,6 @@ func min(a, b int) int {
 	return b
 }
 
-func (g *Game) newScrollText(canvas *ebiten.Image, font *ebiten.Image, tileW, tileH int, scaleX, scaleY float64, text string) *ScrollText {
-	glyphCount := font.Bounds().Dy() / tileH
-	glyphs, err := scrolling.GridImages(font, image.Pt(tileW, tileH), 1, glyphCount)
-	if err != nil {
-		panic(err)
-	}
-
-	return &ScrollText{
-		canvas: canvas,
-		glyphs: glyphs,
-		tiles:  textTiles(text),
-		tileW:  tileW,
-		scaleX: scaleX,
-		scaleY: scaleY,
-		offset: float64(canvas.Bounds().Dx()),
-	}
-}
-
-func textTiles(text string) []int {
-	tokens, err := scrolltext.Parse(text, scrolltext.DomSizes)
-	if err != nil {
-		panic(err)
-	}
-	tiles := make([]int, 0, len(text))
-	for _, token := range tokens {
-		if token.Kind != scrolltext.Text {
-			continue
-		}
-		for _, r := range token.Text {
-			if r == ' ' {
-				tiles = append(tiles, -1)
-			} else {
-				tiles = append(tiles, tileIndex(r))
-			}
-		}
-	}
-	return tiles
-}
-
-var tileIndex = func() func(rune) int {
-	lookup, err := presets.TileLookup("go-dom-intro", true)
-	if err != nil {
-		panic(err)
-	}
-	return func(r rune) int { index, _ := lookup(r); return index }
-}()
-
-func (g *Game) getFullText() string {
-	spc0 := "                 "
-	spc1 := "         "
-	spc2 := "     "
-	spc3 := "   "
-
-	text := "          THE UNION IS PROUD TO PRESENT YOU :" + spc0 + "^Cs2;INTERNATIONAL KARATE PLUS" + spc2 + "^Cs0;CRACKED  BY" + spc0 + "^Cs3;DOM AND CORWIN" + spc3 + "^Cs1;FROM THE" + spc1 + "^Cs3;REPLICANTS AND DMA" + spc3
-	text += "^Cs1; PRESS F1-F5 AND SEE (IF YOU CAN !!!!) AND LIST..........    A SPECIAL HI TO WILD-XEROX OR RANK-COPPER MY MASTER!!!!!ARF.... HEEEUUUU JUST A LITTLE QUESTION : WHO HAVE" + spc1
-	text += "^Cs2;BARBARIAN 2 ????????" + spc2 + "^Cs1;RRRRHHHHHAAAAAAAAAAA!!!!!! ANYBODY ????? I NEED BLOOD RRRHHAAAA!!!!! NEED HEAD !!!!! OOOUUUIIIINNNN I WEEP .. I CRY...... I RAVE , I'M DELIRIOUS I'M CAUGHT IN THE ACT-HANDED!!!!!!!" + spc1
-	text += "^Cs0;OK KO I STOP, I RESET, I BREAK, I DRINK,I FLY, I CR...-CR... HIHIHI FINALLY I SAY :" + spc0 + "^Cs3;SHEAT" + spc3 + "    ^Cs2;HEY HAVE-YOU CANAL PLUS??????????    WHAT ???????    I SAY CANAL PLUS    BORDEL !! (IN FRENCH)"
-	text += " YOU DON'T HAVE !!!! BUY THIS AND YOU WILL SEE MY MASTER : I NAME : RANK-COOPER ARF ARF HE TURN ONE'S BACK ON THE CAMERA    OOOUUFF!!!HIHI GGGGGGGGGOOOOOOOOODDDDDDDDD" + spc2 + "^Cs1;IT'S ALL FOR DAY......" + spc1
-	text += "^Cs0;REMEMBER YOU BARBARIAN 2 AND CANAL PLUS AND MY MASTER OF COURSE........ HI TO : ALL MEMBERS OF DMA(ESPECIALLY LOCKBUSTER FOR ORIGINAL), DELTA FORCE, TEX, BLADE RUNNERS, CHON-CHON, ALDO, ST-CONNEXION, THE HOBBIT BROTHERS, "
-	text += "ABC 85, THE BARBARIANS......." + spc0
-	text += "^Cs0;              "
-
-	return text
-}
-
-func (g *Game) setSpeed() {
-	switch g.actSize {
-	case 0:
-		g.scrollText1.speed = 8 * g.spinc
-		g.scrollText2.speed = 16 * g.spinc
-		g.scrollText3.speed = 32 * g.spinc
-		g.scrollText4.speed = 64 * g.spinc
-	case 1:
-		g.scrollText1.speed = 4 * g.spinc
-		g.scrollText2.speed = 8 * g.spinc
-		g.scrollText3.speed = 16 * g.spinc
-		g.scrollText4.speed = 32 * g.spinc
-	case 2:
-		g.scrollText1.speed = 2 * g.spinc
-		g.scrollText2.speed = 4 * g.spinc
-		g.scrollText3.speed = 8 * g.spinc
-		g.scrollText4.speed = 16 * g.spinc
-	case 3:
-		g.scrollText1.speed = 1 * g.spinc
-		g.scrollText2.speed = 2 * g.spinc
-		g.scrollText3.speed = 4 * g.spinc
-		g.scrollText4.speed = 8 * g.spinc
-	}
-}
-
-func (st *ScrollText) advance() {
-	st.offset -= st.speed
-	if len(st.tiles) == 0 {
-		return
-	}
-
-	scaledTileW := float64(st.tileW) * st.scaleX
-	totalWidth := float64(len(st.tiles)) * scaledTileW
-	if totalWidth > 0 && st.offset <= -totalWidth {
-		st.offset += totalWidth + float64(st.canvas.Bounds().Dx())
-	}
-}
-
-func (g *Game) activeScrollText() *ScrollText {
-	switch g.actSize {
-	case 1:
-		return g.scrollText2
-	case 2:
-		return g.scrollText3
-	case 3:
-		return g.scrollText4
-	default:
-		return g.scrollText1
-	}
-}
-
-func (st *ScrollText) drawAtOffset(offset float64) {
-	st.canvas.Clear()
-	if st.renderer == nil {
-		images := make([]*ebiten.Image, len(st.tiles))
-		for i, tile := range st.tiles {
-			if tile >= 0 && tile < len(st.glyphs) {
-				images[i] = st.glyphs[tile]
-			}
-		}
-		var err error
-		st.renderer, err = scrolling.FromImages(images, float64(st.tileW))
-		if err != nil {
-			panic(err)
-		}
-	}
-	state := scrolling.IdentityState()
-	state.X = offset
-	state.ScaleX = st.scaleX
-	state.ScaleY = st.scaleY
-	if offset < 0 {
-		state.First = int(math.Floor(-offset / (float64(st.tileW) * st.scaleX)))
-	}
-	state.Map = func(s scrolling.Sample, op *ebiten.DrawImageOptions) bool {
-		return s.X < float64(st.canvas.Bounds().Dx())
-	}
-	st.renderer.DrawAt(st.canvas, state)
-}
-
-func (g *Game) preAnalyzeFontChanges() {
-	var err error
-	g.fontProgram, err = scrolltext.NewFontProgram(g.fullText, scrolltext.DomSizes, "0")
-	if err != nil {
-		panic(err)
-	}
-}
-
-func (g *Game) updateActSizeFromScroll() {
-	if g.fontProgram.Len() == 0 {
-		return
-	}
-
-	st := g.scrollText1
-	switch g.actSize {
-	case 1:
-		st = g.scrollText2
-	case 2:
-		st = g.scrollText3
-	case 3:
-		st = g.scrollText4
-	}
-	if st == nil {
-		return
-	}
-	tileW := float64(st.tileW) * st.scaleX
-	if tileW <= 0 {
-		return
-	}
-	leftGlyph := int(math.Floor(-st.offset / tileW))
-	if leftGlyph < 0 {
-		leftGlyph = 0
-	}
-	visibleGlyphs := int(math.Ceil(float64(st.canvas.Bounds().Dx())/tileW)) + 1
-	glyphPos := leftGlyph + visibleGlyphs
-	if glyphPos >= g.fontProgram.Len() {
-		glyphPos = g.fontProgram.Len() - 1
-	}
-
-	size, err := strconv.Atoi(g.fontProgram.FontAt(glyphPos))
-	if err != nil {
-		panic(err)
-	}
-	if size != g.actSize {
-		g.actSize = size
-		g.setSpeed()
-	}
-}
-
 func (g *Game) Update() error {
 	if g.motionErr != nil {
 		return g.motionErr
@@ -520,7 +283,9 @@ func (g *Game) Update() error {
 		} else if g.spinc == 0.25 {
 			g.spinc = 0.5
 		}
-		g.setSpeed()
+		if err := g.sizeBank.SetSpeedMultiplier(g.spinc); err != nil {
+			return err
+		}
 	}
 	if ebiten.IsKeyPressed(ebiten.KeyF2) {
 		if g.spinc > 1 {
@@ -530,7 +295,9 @@ func (g *Game) Update() error {
 		} else if g.spinc == 1 {
 			g.spinc = 0.5
 		}
-		g.setSpeed()
+		if err := g.sizeBank.SetSpeedMultiplier(g.spinc); err != nil {
+			return err
+		}
 	}
 
 	g.backgroundMotion.Step()
@@ -542,23 +309,11 @@ func (g *Game) Update() error {
 		}
 	}
 
-	if g.scrollText1 != nil {
-		g.scrollText1.advance()
-		baseOffset := g.scrollText1.offset
-		baseWidth := float64(g.scrollText1.canvas.Bounds().Dx())
-		if g.scrollText2 != nil {
-			g.scrollText2.offset = baseOffset*g.scrollText2.scaleX + (1-g.scrollText2.scaleX)*baseWidth
-		}
-		if g.scrollText3 != nil {
-			g.scrollText3.offset = baseOffset*g.scrollText3.scaleX + (1-g.scrollText3.scaleX)*baseWidth
-		}
-		if g.scrollText4 != nil {
-			g.scrollText4.offset = baseOffset*g.scrollText4.scaleX + (1-g.scrollText4.scaleX)*baseWidth
+	if g.scroll != nil {
+		if err := g.scroll.Update(kit.Frame{}); err != nil {
+			return err
 		}
 	}
-	g.updateActSizeFromScroll()
-	activeScroll := g.activeScrollText()
-	activeScroll.drawAtOffset(activeScroll.offset)
 
 	return nil
 }
@@ -573,23 +328,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			g.offScroll.Clear()
 		}
 
-		switch g.actSize {
-		case 0:
-			if g.scrollCanvas1 != nil {
-				drawRepeatedVertically(g.offScroll, g.scrollCanvas1, 2, 36, 11)
-			}
-		case 1:
-			if g.scrollCanvas2 != nil {
-				drawRepeatedVertically(g.offScroll, g.scrollCanvas2, 2, 66, 6)
-			}
-		case 2:
-			if g.scrollCanvas3 != nil {
-				drawRepeatedVertically(g.offScroll, g.scrollCanvas3, 0, 134, 3)
-			}
-		case 3:
-			if g.scrollCanvas4 != nil {
-				drawImageAt(g.offScroll, g.scrollCanvas4, 0, 4)
-			}
+		if g.scroll != nil {
+			g.scroll.Draw(g.offScroll)
 		}
 
 		if g.mergeCanvas != nil {
@@ -646,18 +386,23 @@ func drawImageAt(dest, src *ebiten.Image, x, y int) {
 	composite.Instance{Image: src, Options: op}.Draw(dest)
 }
 
-func drawRepeatedVertically(dest, src *ebiten.Image, y, step, count int) {
-	if src == nil || dest == nil {
-		return
-	}
-	var op ebiten.DrawImageOptions
-	op.GeoM.Translate(0, float64(y))
-	for range count {
-		dest.DrawImage(src, &op)
-		op.GeoM.Translate(0, float64(step))
-	}
-}
-
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 	return screenWidth, screenHeight
+}
+
+// Cleanup releases DCK surfaces and audio streams when the screen closes.
+func (g *Game) Cleanup() {
+	if g.scroll != nil {
+		_ = g.scroll.Close()
+		g.scroll = nil
+		g.sizeBank = nil
+	}
+	if g.audioPlayer != nil {
+		_ = g.audioPlayer.Close()
+		g.audioPlayer = nil
+	}
+	if g.musicStream != nil {
+		_ = g.musicStream.Close()
+		g.musicStream = nil
+	}
 }
