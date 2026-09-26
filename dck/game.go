@@ -12,7 +12,6 @@ import (
 
 	"github.com/olivierh59500/democonstructionkit/composite"
 	"github.com/olivierh59500/democonstructionkit/effects"
-	"github.com/olivierh59500/democonstructionkit/motion"
 	"github.com/olivierh59500/democonstructionkit/scrolling"
 	"github.com/olivierh59500/democonstructionkit/sound"
 	"go-dom-intro/dck/internal/textdata"
@@ -49,8 +48,8 @@ type Game struct {
 	backRast   *ebiten.Image
 	starAtlas  *sprites.Atlas
 	stars      *sprites.AnimatedField
-	backSlices []*ebiten.Image
 	baseFont   *ebiten.Image
+	background *composite.VerticalStripTrain
 
 	scroll   *scrolling.Scrolling
 	sizeBank *scrolling.SizeBank
@@ -62,25 +61,21 @@ type Game struct {
 	audioReady   bool
 	musicStarted bool
 
-	stop             int
-	backgroundMotion *motion.WrapBank
-	motionErr        error
-	spinc            float64
+	stop      int
+	motionErr error
+	spinc     float64
 }
 
 func NewGame() *Game {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	g := &Game{stop: 1, spinc: 1}
-	g.backgroundMotion, g.motionErr = motion.NewWrapBank(motion.WrapBankConfig{
-		Start: []float64{0}, Velocity: []float64{2},
-		Upper: &motion.WrapLimit{Boundary: 654, Restart: 0, Inclusive: true},
-	})
+	g.loadAssets()
+	g.initStarAtlas()
 	if g.motionErr != nil {
 		return g
 	}
-	g.loadAssets()
-	g.cacheSubImages()
+	g.background, g.motionErr = composite.NewVerticalStripTrain(presets.DOMBackgroundStrips(g.backRast))
 	if g.motionErr != nil {
 		return g
 	}
@@ -127,28 +122,10 @@ func (g *Game) loadAssets() {
 	g.baseFont = g.loadImage("rep_ik+_font0.png")
 }
 
-func (g *Game) cacheSubImages() {
-	const (
-		starWidth       = 64
-		starHeight      = 46
-		backSliceHeight = 36
-	)
-
+func (g *Game) initStarAtlas() {
 	g.starAtlas, g.motionErr = sprites.NewAtlas(sprites.AtlasConfig{
-		Image: g.starsImage, TileW: starWidth, TileH: starHeight,
+		Image: g.starsImage, TileW: 64, TileH: 46,
 	})
-	if g.motionErr != nil {
-		return
-	}
-
-	maxBackSliceY := g.backRast.Bounds().Dy() - backSliceHeight
-	g.backSlices = make([]*ebiten.Image, maxBackSliceY/2+1)
-	for index := range g.backSlices {
-		y := index * 2
-		rect := image.Rect(0, y, screenWidth, y+backSliceHeight)
-		g.backSlices[index] = g.backRast.SubImage(rect).(*ebiten.Image)
-	}
-
 }
 
 func (g *Game) initAudio() {
@@ -291,7 +268,11 @@ func (g *Game) Update() error {
 		}
 	}
 
-	g.backgroundMotion.Step()
+	if g.background != nil {
+		if err := g.background.Update(kit.Frame{}); err != nil {
+			return err
+		}
+	}
 
 	if g.stars != nil {
 		if err := g.stars.Update(kit.Frame{}); err != nil {
@@ -316,14 +297,8 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	if g.stop > 0 {
 		screen.Fill(colornames.Black)
 
-		if g.backRast != nil {
-			for j := 0; j < 11; j++ {
-				sy := int(g.backgroundMotion.At(0)) + j*4
-				index := sy / 2
-				if index < len(g.backSlices) {
-					drawImageAt(screen, g.backSlices[index], 0, 60+2+j*36)
-				}
-			}
+		if g.background != nil {
+			g.background.Draw(screen)
 		}
 
 		if g.textMask != nil {
@@ -342,18 +317,16 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	}
 }
 
-func drawImageAt(dest, src *ebiten.Image, x, y int) {
-	op := ebiten.DrawImageOptions{}
-	op.GeoM.Translate(float64(x), float64(y))
-	composite.Instance{Image: src, Options: op}.Draw(dest)
-}
-
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
 	return screenWidth, screenHeight
 }
 
 // Cleanup releases DCK surfaces and audio streams when the screen closes.
 func (g *Game) Cleanup() {
+	if g.background != nil {
+		_ = g.background.Close()
+		g.background = nil
+	}
 	if g.textMask != nil {
 		_ = g.textMask.Close()
 		g.textMask = nil

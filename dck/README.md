@@ -21,5 +21,7 @@ font controls, per-size speed and cached repeated text strips. The authored
 message stays in `dck/internal/textdata`; a pure test compares the controller
 with the previous choreography across 100,000 simulation ticks. Three
 moving raster copies color the text through `effects.NewMaskWith`, with editable
-phase, blend, viewport and top crop. The scene still chooses its background,
-logo, stars and input controls.
+phase, blend, viewport and top crop. The scene still chooses its background
+artwork, logo, stars and input controls.
+The vertically sampled scenery now uses `composite.VerticalStripTrain`; its
+source stride, crop height, row spacing, phase and wrap threshold are editable.
